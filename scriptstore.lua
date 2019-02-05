@@ -3,7 +3,7 @@
 local SCRIPT_FILE_NAME = GetScriptName();
 local SCRIPT_FILE_ADDR = "https://raw.githubusercontent.com/hyperthegreat/aw_script_store/master/scriptstore.lua";
 local VERSION_FILE_ADDR = "https://raw.githubusercontent.com/hyperthegreat/aw_script_store/master/version.txt";
-local VERSION_NUMBER = "1.0.0";
+local VERSION_NUMBER = "1.0.1";
 local API_URL = "http://api.shadyretard.io";
 
 local available_scripts = {};
@@ -54,11 +54,22 @@ local update_available = false;
 local version_check_done = false;
 local update_downloaded = false;
 
-script_scopes = {};
 local animations = {};
 
+function IsMouseInRect(left, top, width, height)
+    local mouse_x, mouse_y = input.GetMousePos();
+    return (mouse_x >= left and mouse_x <= left + width and mouse_y >= top and mouse_y <= top + height);
+end
 
-function UpdateEventHandler()
+function IsSameColor(c1, c2)
+    return c1[1] == c2[1] and c1[2] == c2[2] and c1[3] == c2[3] and c1[4] == c2[4];
+end
+
+function Lerp(a, b, u)
+    return (1 - u) * a + u * b;
+end
+
+local function UpdateEventHandler()
     if (update_available and not update_downloaded) then
         if (gui.GetValue("lua_allow_cfg") == false) then
             draw.Color(255, 0, 0, 255);
@@ -94,58 +105,221 @@ function UpdateEventHandler()
     end
 end
 
-function DrawEvent()
-    if (gui.GetValue("lua_allow_http") == false) then
+
+local function SaveConfig()
+    local current_data;
+    local scriptstore_settings_file = file.Open("scriptstore_settings.dat", "r");
+    if (scriptstore_settings_file == nil) then
         return;
     end
 
-    draw.SetFont(MAIN_FONT);
-    if (draw == nil) then
-        return;
-    end
-    
-    if (last_token_update ~= nil and last_token_update > globals.RealTime()) then
-        last_token_update = globals.RealTime();
+    local contents = scriptstore_settings_file:Read();
+    scriptstore_settings_file:Close();
+
+    if (contents ~= '') then
+        current_data = json.decode(contents);
     end
 
-    if (loaded_config == false) then
-        loaded_config = true;
-        LoadSettings();
-        return;
+    local settings = {};
+    settings.configs = configs;
+
+    if (current_data ~= nil and current_data.configs ~= nil) then
+        settings.configs = current_data.configs;
+        settings.configs[current_config] = configs[current_config];
     end
 
-    if (loaded_config == true and token ~= SCRIPTSTORE_TOKEN:GetValue() and globals.RealTime() - last_token_update > TOKEN_COOLDOWN) then
-        token = SCRIPTSTORE_TOKEN:GetValue();
-        last_token_update = globals.RealTime();
-        SaveConfig();
-    end
-
-    if (SHOW_SCRIPTSTORE_CB:GetValue() == false) then
-        return;
-    end
-
-    if (should_check_available_scripts == true) then
-        should_check_available_scripts = false;
-        GetScriptStoreData();
-        return;
-    end
-
-    if (last_click ~= nil and last_click > globals.RealTime()) then
-        last_click = globals.RealTime();
-    end
-
-    local mouse_down = input.IsButtonDown(1);
-    DrawMenu(mouse_down);
-    DrawScripts(mouse_down);
+    settings.sorting = current_sorting;
+    settings.token = token;
+    local scriptstore_settings_file = file.Open("scriptstore_settings.dat", "w");
+    scriptstore_settings_file:Write(json.encode(settings));
+    scriptstore_settings_file:Close();
 end
 
-function HandleMouseEvent()
+
+local function ActivateScript(script, do_save)
+    http.Get(API_URL .. "/scripts/code/" .. script._id .. "?token=" .. token, function(script_code)
+        if (script_code == nil or script_code == "error") then
+            script.error = "NETWORK ERROR";
+            return;
+        elseif (script_code == "access_denied") then
+            script.error = "ACCESS DENIED";
+            return;
+        end
+
+        local activator = file.Open("scriptstore_activation.lua", "w");
+        activator:Write(script_code);
+        activator:Close();
+        RunScript("scriptstore_activation.lua");
+
+        if (do_save ~= nil or do_save == false) then
+            return;
+        end
+
+        if (configs[current_config] == nil) then
+            configs[current_config] = {
+                scripts = {}
+            }
+        end
+
+        table.insert(configs[current_config].scripts, script);
+        file.Delete("scriptstore_activation.lua");
+        script.error = nil;
+        SaveConfig();
+    end);
+end
+
+local function DeactivateScript(script)
+    local script_deactivation = "";
+
+    for i = 1, #script.callbacks do
+        local callback = script.callbacks[i];
+        script_deactivation = script_deactivation .. "callbacks.Unregister('" .. callback.id .. "', '" .. callback.uniqueId .. "'); \n";
+    end
+
+    if (script_deactivation ~= "") then
+        local deactivator = file.Open("scriptstore_deactivation.lua", "w");
+        deactivator:Write(script_deactivation);
+        deactivator:Close();
+        RunScript("scriptstore_deactivation.lua");
+        file.Delete("scriptstore_deactivation.lua");
+    end
+
+    if (configs[current_config] == nil) then
+        configs[current_config] = {
+            scripts = {}
+        };
+    end
+
+    for i = 1, #configs[current_config].scripts do
+        if (configs[current_config].scripts[i].id == script.id) then
+            table.remove(configs[current_config].scripts, i);
+            break;
+        end
+    end
+
+    SaveConfig();
+end
+
+local function LoadSettings()
+    local scriptstore_settings_file = file.Open("scriptstore_settings.dat", "r");
+    if (scriptstore_settings_file == nil) then
+        return;
+    end
+
+    local contents = scriptstore_settings_file:Read();
+    scriptstore_settings_file:Close();
+    if (contents == '') then
+        return;
+    end
+
+    local settings = json.decode(contents);
+    if (settings == nil or settings == "" or settings.configs == nil) then
+        return;
+    end
+
+    current_sorting = settings.sorting;
+    token = settings.token;
+    SCRIPTSTORE_TOKEN:SetValue(token);
+    configs = settings.configs;
+
+    if (configs == nil or configs["default"] == nil) then
+        return;
+    end
+
+    for i = 1, #configs["default"].scripts do
+        ActivateScript(configs["default"].scripts[i], false);
+    end
+end
+
+local function IsActiveScript(script)
+    local found = false;
+    local update_available = false;
+    if (configs[current_config] ~= nil and configs[current_config].scripts ~= nil) then
+        for i = 1, #configs[current_config].scripts do
+            if (configs[current_config].scripts[i].id == script.id) then
+                found = true;
+                if (configs[current_config].scripts[i].__v ~= script.__v) then
+                    update_available = true;
+                end
+
+                break
+            end
+        end
+    end
+    return found, update_available;
+end
+
+local function ChangeConfig(config_name)
+    if (config_name == current_config) then
+        return;
+    end
+
+    local should_be_deactivated = {};
+    for i = 1, #configs[current_config].scripts do
+        local script = configs[current_config].scripts[i];
+        should_be_deactivated[script.id] = script;
+    end
+
+    local should_be_activated = {};
+
+    local new_config = configs[config_name];
+    for i = 1, new_config.scripts do
+        local script = new_config.scripts[i];
+        local is_active = IsActiveScript(script);
+        if (is_active) then
+            should_be_deactivated[script.id] = nil;
+        else
+            table.insert(should_be_activated, script);
+        end
+    end
+
+    current_config = config_name;
+
+    -- Deactivate old scripts
+    for index, obj in pairs(should_be_deactivated) do
+        if (obj ~= nil) then
+            DeactivateScript(obj);
+        end
+    end
+
+    -- Activate new scripts
+    for i = 1, #should_be_activated do
+        local script = should_be_activated[i];
+        if script ~= nil then
+            ActivateScript(script);
+        end
+    end
+end
+
+local function GetScriptStoreData()
+    local scriptstore_data = http.Get(API_URL .. "/scripts?sort=" .. sorting_options[current_sorting] .. "&direction=" .. current_sorting_direction .. "&token=" .. token);
+    if (scriptstore_data == nil or scriptstore_data == "error") then
+        return;
+    end
+
+    available_scripts = json.decode(scriptstore_data);
+
+    for i = 1, #available_scripts do
+        http.Get(API_URL .. "/scripts/image/" .. available_scripts[i]._id .. "?token=" .. token, function(image_data)
+            if (image_data == nil or image_data == "error") then
+                available_scripts[i].error = "NETWORK ERROR";
+            elseif (image_data == "access_denied") then
+                available_scripts[i].error = "ACCESS DENIED";
+            else
+                available_scripts[i].image = draw.CreateTexture(common.DecodePNG(image_data));
+            end
+        end);
+    end
+end
+
+local function HandleMouseEvent()
     if (gui.GetValue("lua_allow_http") == false) then
         return;
     end
 
     local mouse_x, mouse_y = input.GetMousePos();
     local left_mouse_down = input.IsButtonDown(1);
+    local left_mouse_pressed = input.IsButtonPressed(1);
 
     if (is_dragging == true and left_mouse_down == false) then
         is_dragging = false;
@@ -171,28 +345,28 @@ function HandleMouseEvent()
         return;
     end
 
-    if (IsMouseInRect(SCRIPTSTORE_WINDOW_X, SCRIPTSTORE_WINDOW_Y - 50, SCRIPTSTORE_WINDOW_WIDTH, 25)) then
+    if (left_mouse_pressed and IsMouseInRect(SCRIPTSTORE_WINDOW_X, SCRIPTSTORE_WINDOW_Y - 50, SCRIPTSTORE_WINDOW_WIDTH, 25)) then
         is_dragging = true;
         dragging_offset_x = mouse_x - SCRIPTSTORE_WINDOW_X;
         dragging_offset_y = mouse_y - SCRIPTSTORE_WINDOW_Y;
         return;
     end
 
-    if (IsMouseInRect(SCRIPTSTORE_WINDOW_X + SCRIPTSTORE_WINDOW_WIDTH - 5, SCRIPTSTORE_WINDOW_Y + SCRIPTSTORE_WINDOW_HEIGHT + 5, 25, 25)) then
+    if (left_mouse_pressed and IsMouseInRect(SCRIPTSTORE_WINDOW_X + SCRIPTSTORE_WINDOW_WIDTH - 5, SCRIPTSTORE_WINDOW_Y + SCRIPTSTORE_WINDOW_HEIGHT + 5, 25, 25)) then
         is_resizing = true;
         return;
     end
 end
 
-function DrawMenuButtons(mouse_down)
+local function DrawMenuButtons(mouse_down)
     local buttons = {};
 
-    table.insert(buttons, {
-        text = "Configs",
-        click = function()
-
-        end
-    })
+--    table.insert(buttons, {
+--        text = "Configs",
+--        click = function()
+--
+--        end
+--    })
 
     table.insert(buttons, {
         text = "Refresh",
@@ -238,7 +412,7 @@ function DrawMenuButtons(mouse_down)
         local text_w, text_h = draw.GetTextSize(button.text);
         if (IsMouseInRect(last_button_x - 16 - text_w, y, 10 + text_w, 25)) then
             AddAnimation(animation_id, "HOVER", { gui.GetValue('clr_gui_window_header_tab1') }, { gui.GetValue('clr_gui_window_header_tab2') }, 10);
-            if (mouse_down and globals.RealTime() - last_click > CLICK_COOLDOWN) then
+            if (not is_dragging and not is_resizing and mouse_down) then
                 button.click();
                 last_click = globals.RealTime();
             end
@@ -255,7 +429,7 @@ function DrawMenuButtons(mouse_down)
 
 end
 
-function DrawMenu(mouse_down)
+local function DrawMenu(mouse_down)
     draw.SetFont(MAIN_FONT);
     draw.Color(gui.GetValue('clr_gui_window_background'));
     draw.FilledRect(SCRIPTSTORE_WINDOW_X, SCRIPTSTORE_WINDOW_Y - 25, SCRIPTSTORE_WINDOW_X + SCRIPTSTORE_WINDOW_WIDTH, SCRIPTSTORE_WINDOW_Y + SCRIPTSTORE_WINDOW_HEIGHT);
@@ -280,11 +454,11 @@ function DrawMenu(mouse_down)
     draw.FilledRect(SCRIPTSTORE_WINDOW_X + SCRIPTSTORE_WINDOW_WIDTH - 5, SCRIPTSTORE_WINDOW_Y + SCRIPTSTORE_WINDOW_HEIGHT + 26, SCRIPTSTORE_WINDOW_X + SCRIPTSTORE_WINDOW_WIDTH + 9, SCRIPTSTORE_WINDOW_Y + SCRIPTSTORE_WINDOW_HEIGHT + 30);
 end
 
-function DrawScript(page, col, row, script, is_active, is_update_available, mouse_down)
+local function DrawScript(page, col, row, script, is_active, is_update_available, mouse_down)
     draw.SetFont(MAIN_FONT);
     local script_x, script_y = BLOCK_MARGIN + SCRIPTSTORE_WINDOW_X + (col * (BLOCK_MARGIN + BLOCK_WIDTH)), BLOCK_MARGIN + SCRIPTSTORE_WINDOW_Y + (row * (BLOCK_MARGIN + BLOCK_HEIGHT));
 
-    if (mouse_down and IsMouseInRect(script_x, script_y, BLOCK_WIDTH, BLOCK_HEIGHT) and globals.RealTime() - last_click > CLICK_COOLDOWN) then
+    if (not is_dragging and not is_resizing and mouse_down and IsMouseInRect(script_x, script_y, BLOCK_WIDTH, BLOCK_HEIGHT)) then
         last_click = globals.RealTime();
         if (is_active == false or script.error ~= nil) then
             ActivateScript(script);
@@ -319,16 +493,20 @@ function DrawScript(page, col, row, script, is_active, is_update_available, mous
     end
 
     -- Script title
-    draw.Color(0, 0, 0, 80);
-    draw.FilledRect(script_x, script_y, script_x + BLOCK_WIDTH, script_y + 25);
-    draw.Color(gui.GetValue('clr_gui_text1'));
-    draw.TextShadow(script_x + 8, script_y + 8, script.title);
+    local chars_per_line = math.floor(BLOCK_WIDTH / draw.GetTextSize('a'));
+    local num_of_lines = math.ceil(string.len(script.title) / chars_per_line);
+    for i = 1, num_of_lines do
+        draw.Color(0, 0, 0, 80);
+        draw.FilledRect(script_x, (i-1) * 25 + script_y, script_x + BLOCK_WIDTH, (i-1) * 25 + script_y + 25);
+        draw.Color(gui.GetValue('clr_gui_text1'));
+        draw.TextShadow(script_x + 8, (i-1) * 25 + script_y + 8, string.sub(script.title, (i-1) * chars_per_line, i * chars_per_line - 1));
+    end
 
     -- Script author
     draw.Color(0, 0, 0, 80);
-    draw.FilledRect(script_x, script_y + 25, script_x + BLOCK_WIDTH, script_y + 50);
+    draw.FilledRect(script_x, num_of_lines * 25 + script_y, script_x + BLOCK_WIDTH, num_of_lines * 25 + script_y + 25);
     draw.Color(gui.GetValue('clr_gui_text1'));
-    draw.TextShadow(script_x + 8, script_y + 25 + 8, "By " .. script.author);
+    draw.TextShadow(script_x + 8, num_of_lines * 25 + script_y + 8, "By " .. script.author);
 
     -- Script additional info
     draw.Color(0, 0, 0, 80);
@@ -359,142 +537,12 @@ function DrawScript(page, col, row, script, is_active, is_update_available, mous
     return true;
 end
 
-function ActivateScript(script, do_save)
-    http.Get(API_URL .. "/scripts/code/" .. script._id .. "?token=" .. token, function(script_code)
-        if (script_code == nil or script_code == "error") then
-            script.error = "NETWORK ERROR";
-            return;
-        elseif (script_code == "access_denied") then
-            script.error = "ACCESS DENIED";
-            return;
-        end
-
-        local activator = file.Open("scriptstore_activation.lua", "w");
-        activator:Write(script_code);
-        activator:Close();
-        RunScript("scriptstore_activation.lua");
-
-        if (do_save ~= nil or do_save == false) then
-            return;
-        end
-
-        if (configs[current_config] == nil) then
-            configs[current_config] = {
-                scripts = {}
-            }
-        end
-
-        table.insert(configs[current_config].scripts, script);
-        file.Delete("scriptstore_activation.lua");
-        script.error = nil;
-        SaveConfig();
-    end);
-end
-
-function LoadSettings()
-    local scriptstore_settings_file = file.Open("scriptstore_settings.dat", "r");
-    if (scriptstore_settings_file == nil) then
-        return;
-    end
-
-    local contents = scriptstore_settings_file:Read();
-    scriptstore_settings_file:Close();
-    if (contents == '') then
-        return;
-    end
-
-    local settings = json.decode(contents);
-    if (settings == nil or settings == "" or settings.configs == nil) then
-        return;
-    end
-
-    current_sorting = settings.sorting;
-    token = settings.token;
-    SCRIPTSTORE_TOKEN:SetValue(token);
-    configs = settings.configs;
-
-    if (configs == nil or configs["default"] == nil) then
-        return;
-    end
-
-    for i = 1, #configs["default"].scripts do
-        ActivateScript(configs["default"].scripts[i], false);
-    end
-end
-
-function SaveConfig()
-    local current_data;
-    local scriptstore_settings_file = file.Open("scriptstore_settings.dat", "r");
-    if (scriptstore_settings_file == nil) then
-        return;
-    end
-
-    local contents = scriptstore_settings_file:Read();
-    scriptstore_settings_file:Close();
-
-    if (contents ~= '') then
-        current_data = json.decode(contents);
-    end
-
-    local settings = {};
-    settings.configs = configs;
-
-    if (current_data ~= nil and current_data.configs ~= nil) then
-        settings.configs = current_data.configs;
-        settings.configs[current_config] = configs[current_config];
-    end
-
-    settings.sorting = current_sorting;
-    settings.token = token;
-    local scriptstore_settings_file = file.Open("scriptstore_settings.dat", "w");
-    scriptstore_settings_file:Write(json.encode(settings));
-    scriptstore_settings_file:Close();
-end
-
-function DeactivateScript(script)
-    local script_deactivation = "";
-    for i = 1, #script.guiObjects do
-        local guiObj = script.guiObjects[i];
-        local guiEl = script_scopes[guiObj.scope][guiObj.guiObject];
-        if (guiEl ~= nil) then
-            guiEl:SetActive(0);
-        end
-    end
-
-    for i = 1, #script.callbacks do
-        local callback = script.callbacks[i];
-        script_deactivation = script_deactivation .. "callbacks.Unregister('" .. callback.id .. "', '" .. callback.uniqueId .. "'); \n";
-    end
-    if (script_deactivation ~= "") then
-        local deactivator = file.Open("scriptstore_deactivation.lua", "w");
-        deactivator:Write(script_deactivation);
-        deactivator:Close();
-        RunScript("scriptstore_deactivation.lua");
-        file.Delete("scriptstore_deactivation.lua");
-    end
-
-    if (configs[current_config] == nil) then
-        configs[current_config] = {
-            scripts = {}
-        };
-    end
-
-    for i = 1, #configs[current_config].scripts do
-        if (configs[current_config].scripts[i].id == script.id) then
-            table.remove(configs[current_config].scripts, i);
-            break;
-        end
-    end
-
-    SaveConfig();
-end
-
-function DrawPagination(mouse_down, pages)
+local function DrawPagination(mouse_down, pages)
     if (current_page == 1) then
         local disabled_color = { gui.GetValue('clr_gui_button_idle') }
         draw.Color(disabled_color[1], disabled_color[2], disabled_color[3], 50);
     elseif (IsMouseInRect(BLOCK_MARGIN + SCRIPTSTORE_WINDOW_X + 8 - 4, SCRIPTSTORE_WINDOW_Y - 25 + 13 - 4, 28, 28)) then
-        if (mouse_down and globals.RealTime() - last_click > CLICK_COOLDOWN) then
+        if (not is_dragging and not is_resizing and mouse_down) then
             if (current_page > pages) then
                 current_page = pages;
             else
@@ -520,7 +568,7 @@ function DrawPagination(mouse_down, pages)
         local disabled_color = { gui.GetValue('clr_gui_button_idle') }
         draw.Color(disabled_color[1], disabled_color[2], disabled_color[3], 50);
     elseif (IsMouseInRect(SCRIPTSTORE_WINDOW_X + SCRIPTSTORE_WINDOW_WIDTH - BLOCK_MARGIN - 8 - 20 - 4, SCRIPTSTORE_WINDOW_Y - 25 + 13 - 4, 28, 28)) then
-        if (mouse_down and globals.RealTime() - last_click > CLICK_COOLDOWN) then
+        if (not is_dragging and not is_resizing and mouse_down) then
             current_page = current_page + 1;
             last_click = globals.RealTime();
         end
@@ -536,7 +584,7 @@ function DrawPagination(mouse_down, pages)
     draw.TextShadow(SCRIPTSTORE_WINDOW_X + SCRIPTSTORE_WINDOW_WIDTH - BLOCK_MARGIN - 23, SCRIPTSTORE_WINDOW_Y - 9, ">");
 end
 
-function DrawScripts(mouse_down)
+local function DrawScripts(mouse_down)
     if (available_scripts == nil or #available_scripts == 0) then
         return;
     end
@@ -579,64 +627,49 @@ function DrawScripts(mouse_down)
     end
 end
 
-function IsActiveScript(script)
-    local found = false;
-    local update_available = false;
-    if (configs[current_config] ~= nil and configs[current_config].scripts ~= nil) then
-        for i = 1, #configs[current_config].scripts do
-            if (configs[current_config].scripts[i].id == script.id) then
-                found = true;
-                if (configs[current_config].scripts[i].__v ~= script.__v) then
-                    update_available = true;
-                end
-
-                break
-            end
-        end
-    end
-    return found, update_available;
-end
-
-function ChangeConfig(config_name)
-    if (config_name == current_config) then
+local function DrawEvent()
+    if (gui.GetValue("lua_allow_http") == false) then
         return;
     end
 
-    local should_be_deactivated = {};
-    for i = 1, #configs[current_config].scripts do
-        local script = configs[current_config].scripts[i];
-        should_be_deactivated[script.id] = script;
+    draw.SetFont(MAIN_FONT);
+    if (draw == nil) then
+        return;
     end
 
-    local should_be_activated = {};
-
-    local new_config = configs[config_name];
-    for i = 1, new_config.scripts do
-        local script = new_config.scripts[i];
-        local is_active = IsActiveScript(script);
-        if (is_active) then
-            should_be_deactivated[script.id] = nil;
-        else
-            table.insert(should_be_activated, script);
-        end
+    if (last_token_update ~= nil and last_token_update > globals.RealTime()) then
+        last_token_update = globals.RealTime();
     end
 
-    current_config = config_name;
-
-    -- Deactivate old scripts
-    for index, obj in pairs(should_be_deactivated) do
-        if (obj ~= nil) then
-            DeactivateScript(obj);
-        end
+    if (loaded_config == false) then
+        loaded_config = true;
+        LoadSettings();
+        return;
     end
 
-    -- Activate new scripts
-    for i = 1, #should_be_activated do
-        local script = should_be_activated[i];
-        if script ~= nil then
-            ActivateScript(script);
-        end
+    if (loaded_config == true and token ~= SCRIPTSTORE_TOKEN:GetValue() and globals.RealTime() - last_token_update > TOKEN_COOLDOWN) then
+        token = SCRIPTSTORE_TOKEN:GetValue();
+        last_token_update = globals.RealTime();
+        SaveConfig();
     end
+
+    if (SHOW_SCRIPTSTORE_CB:GetValue() == false) then
+        return;
+    end
+
+    if (should_check_available_scripts == true) then
+        should_check_available_scripts = false;
+        GetScriptStoreData();
+        return;
+    end
+
+    if (last_click ~= nil and last_click > globals.RealTime()) then
+        last_click = globals.RealTime();
+    end
+
+    local mouse_down = input.IsButtonPressed(1);
+    DrawMenu(mouse_down);
+    DrawScripts(mouse_down);
 end
 
 function AddAnimation(animation_id, action, start_color, end_color, duration)
@@ -659,19 +692,11 @@ function AddAnimation(animation_id, action, start_color, end_color, duration)
     end
 end
 
-function IsSameColor(c1, c2)
-    return c1[1] == c2[1] and c1[2] == c2[2] and c1[3] == c2[3] and c1[4] == c2[4];
-end
-
-function lerp(a, b, u)
-    return (1 - u) * a + u * b;
-end
-
 function GetColorsByStep(animation)
-    local r = math.max(animation.end_color[1], math.min(255, math.ceil(lerp(animation.start_color[1], animation.end_color[1], animation.step))));
-    local g = math.max(animation.end_color[2], math.min(255, math.ceil(lerp(animation.start_color[2], animation.end_color[2], animation.step))));
-    local b = math.max(animation.end_color[3], math.min(255, math.ceil(lerp(animation.start_color[3], animation.end_color[3], animation.step))));
-    local a = math.max(animation.end_color[4], math.min(255, math.ceil(lerp(animation.start_color[4], animation.end_color[4], animation.step))));
+    local r = math.max(animation.end_color[1], math.min(255, math.ceil(Lerp(animation.start_color[1], animation.end_color[1], animation.step))));
+    local g = math.max(animation.end_color[2], math.min(255, math.ceil(Lerp(animation.start_color[2], animation.end_color[2], animation.step))));
+    local b = math.max(animation.end_color[3], math.min(255, math.ceil(Lerp(animation.start_color[3], animation.end_color[3], animation.step))));
+    local a = math.max(animation.end_color[4], math.min(255, math.ceil(Lerp(animation.start_color[4], animation.end_color[4], animation.step))));
     return { r, g, b, a }
 end
 
@@ -708,30 +733,6 @@ function DrawShadow(left, top, right, bottom, color, length, fade)
         draw.Color(shadow_r, shadow_g, shadow_b, a);
         draw.OutlinedRect(l, t, r, b);
     end
-end
-
-function GetScriptStoreData()
-    local scriptstore_data = http.Get(API_URL .. "/scripts?sort=" .. sorting_options[current_sorting] .. "&direction=" .. current_sorting_direction .. "&token=" .. token);
-    if (scriptstore_data == nil or scriptstore_data == "error") then
-        return;
-    end
-
-    available_scripts = json.decode(scriptstore_data);
---    available_scripts = table.sort(json.decode(scriptstore_data).data, function(a, b)
---        local is_active = IsActiveScript(a);
---        local is_active2 = IsActiveScript(b);
---        return a == true and b == false end)
-
-    for i = 1, #available_scripts do
-        http.Get(API_URL .. "/scripts/image/" .. available_scripts[i]._id .. "?token=" .. token, function(image_data)
-            available_scripts[i].image = draw.CreateTexture(common.DecodePNG(image_data));
-        end);
-    end
-end
-
-function IsMouseInRect(left, top, width, height)
-    local mouse_x, mouse_y = input.GetMousePos();
-    return (mouse_x >= left and mouse_x <= left + width and mouse_y >= top and mouse_y <= top + height);
 end
 
 callbacks.Register("Draw", "ScriptManager_DrawEvent", DrawEvent);
