@@ -1,9 +1,9 @@
--- Script Manager by ShadyRetard
+-- SCRIPTSTORE by ShadyRetard
 
 local SCRIPT_FILE_NAME = GetScriptName();
 local SCRIPT_FILE_ADDR = "https://raw.githubusercontent.com/hyperthegreat/aw_script_store/master/scriptstore.lua";
 local VERSION_FILE_ADDR = "https://raw.githubusercontent.com/hyperthegreat/aw_script_store/master/version.txt";
-local VERSION_NUMBER = "1.0.1";
+local VERSION_NUMBER = "1.0.2";
 local API_URL = "http://api.shadyretard.io";
 
 local available_scripts = {};
@@ -32,13 +32,16 @@ local token = "";
 local configs = {};
 local current_config = "default";
 local current_page = 1;
+local max_shown_scripts = 0;
+local last_max_shown_scripts = 0;
+local total_num_of_scripts = 0;
 local current_sorting = 1;
 local sorting_options = {"downloads", "date", "title", "author"};
 local current_sorting_direction = 1;
 
 local ref = gui.Reference("SETTINGS", "Lua Scripts");
-local SHOW_SCRIPTSTORE_CB = gui.Checkbox(ref, "SHOW_SCRIPTSTORE_CB", "Show Script Manager", false);
-gui.Text(ref, "Script Manager Authentication Token")
+local SHOW_SCRIPTSTORE_CB = gui.Checkbox(ref, "SHOW_SCRIPTSTORE_CB", "Show ScriptStore", false);
+gui.Text(ref, "ScriptStore Authentication Token");
 local SCRIPTSTORE_TOKEN = gui.Editbox(ref, "SCRIPTSTORE_TOKEN", "");
 
 local MAIN_FONT = draw.CreateFont("Tahoma", 13, 13);
@@ -73,7 +76,8 @@ local function UpdateEventHandler()
     if (update_available and not update_downloaded) then
         if (gui.GetValue("lua_allow_cfg") == false) then
             draw.Color(255, 0, 0, 255);
-            draw.Text(0, 0, "[SCRIPT MANAGER] An update is available, please enable 'Allow script/config editing from lua' in the settings tab");
+            draw.SetFont(ERROR_FONT);
+            draw.TextShadow(25, 25, "[SCRIPTSTORE] An update is available, please enable 'Allow script/config editing from lua' in the settings tab");
         else
             local new_version_content = http.Get(SCRIPT_FILE_ADDR);
             local old_script = file.Open(SCRIPT_FILE_NAME, "w");
@@ -86,14 +90,16 @@ local function UpdateEventHandler()
 
     if (update_downloaded) then
         draw.Color(255, 0, 0, 255);
-        draw.Text(0, 0, "[SCRIPT MANAGER] An update has automatically been downloaded, please reload the Script Manager");
+        draw.SetFont(ERROR_FONT);
+        draw.Text(25, 25, "[SCRIPTSTORE] An update has automatically been downloaded, please reload the SCRIPTSTORE");
         return;
     end
 
     if (not version_check_done) then
         if (gui.GetValue("lua_allow_http") == false) then
             draw.Color(255, 0, 0, 255);
-            draw.Text(0, 0, "[SCRIPT MANAGER] Please enable 'Allow internet connections from lua' in your settings tab to use this script");
+            draw.SetFont(ERROR_FONT);
+            draw.Text(25, 25, "[SCRIPTSTORE] Please enable 'Allow internet connections from lua' in your settings tab to use this script");
             return;
         end
 
@@ -146,10 +152,11 @@ local function ActivateScript(script, do_save)
             return;
         end
 
-        local activator = file.Open("scriptstore_activation.lua", "w");
+        local activator = file.Open(script.id .. ".lua", "w");
         activator:Write(script_code);
         activator:Close();
-        RunScript("scriptstore_activation.lua");
+        RunScript(script.id .. ".lua");
+        file.Delete(script.id .. ".lua");
 
         if (do_save ~= nil or do_save == false) then
             return;
@@ -162,7 +169,6 @@ local function ActivateScript(script, do_save)
         end
 
         table.insert(configs[current_config].scripts, script);
-        file.Delete("scriptstore_activation.lua");
         script.error = nil;
         SaveConfig();
     end);
@@ -177,11 +183,11 @@ local function DeactivateScript(script)
     end
 
     if (script_deactivation ~= "") then
-        local deactivator = file.Open("scriptstore_deactivation.lua", "w");
+        local deactivator = file.Open(script.id .. "_deactivation.lua", "w");
         deactivator:Write(script_deactivation);
         deactivator:Close();
-        RunScript("scriptstore_deactivation.lua");
-        file.Delete("scriptstore_deactivation.lua");
+        RunScript(script.id .. "_deactivation.lua");
+        file.Delete(script.id .. "_deactivation.lua");
     end
 
     if (configs[current_config] == nil) then
@@ -291,16 +297,22 @@ local function ChangeConfig(config_name)
     end
 end
 
-local function GetScriptStoreData()
-    local scriptstore_data = http.Get(API_URL .. "/scripts?sort=" .. sorting_options[current_sorting] .. "&direction=" .. current_sorting_direction .. "&token=" .. token);
+local function GetScriptStoreData(offset, limit)
+    local scriptstore_data = http.Get(API_URL .. "/scripts?sort=" .. sorting_options[current_sorting] .. "&direction=" .. current_sorting_direction .. "&token=" .. token .. "&offset=" .. offset .. "&limit=" .. limit);
     if (scriptstore_data == nil or scriptstore_data == "error") then
         return;
     end
 
-    available_scripts = json.decode(scriptstore_data);
+    local data = json.decode(scriptstore_data);
+    available_scripts = data.scripts;
+    total_num_of_scripts = data.total
 
     for i = 1, #available_scripts do
         http.Get(API_URL .. "/scripts/image/" .. available_scripts[i]._id .. "?token=" .. token, function(image_data)
+            if (available_scripts[i] == nil or available_scripts[i].image ~= nil) then
+                return;
+            end
+
             if (image_data == nil or image_data == "error") then
                 available_scripts[i].error = "NETWORK ERROR";
             elseif (image_data == "access_denied") then
@@ -313,7 +325,7 @@ local function GetScriptStoreData()
 end
 
 local function HandleMouseEvent()
-    if (gui.GetValue("lua_allow_http") == false) then
+    if (gui.GetValue("lua_allow_http") == false or gui.GetValue("lua_allow_cfg") == false) then
         return;
     end
 
@@ -438,7 +450,7 @@ local function DrawMenu(mouse_down)
     draw.Color(gui.GetValue('clr_gui_window_header_tab2'));
     draw.FilledRect(SCRIPTSTORE_WINDOW_X, SCRIPTSTORE_WINDOW_Y - 25, SCRIPTSTORE_WINDOW_X + SCRIPTSTORE_WINDOW_WIDTH, SCRIPTSTORE_WINDOW_Y - 25 + 4);
     draw.Color(gui.GetValue('clr_gui_text1'));
-    draw.TextShadow(SCRIPTSTORE_WINDOW_X + 8, SCRIPTSTORE_WINDOW_Y - 25 - 18, "Aimware Script Manager");
+    draw.TextShadow(SCRIPTSTORE_WINDOW_X + 8, SCRIPTSTORE_WINDOW_Y - 25 - 18, "ScriptStore");
 
     DrawMenuButtons(mouse_down);
 
@@ -548,7 +560,7 @@ local function DrawPagination(mouse_down, pages)
             else
                 current_page = current_page - 1;
             end
-
+            GetScriptStoreData((current_page - 1) * max_shown_scripts, max_shown_scripts);
             last_click = globals.RealTime();
         end
 
@@ -570,6 +582,7 @@ local function DrawPagination(mouse_down, pages)
     elseif (IsMouseInRect(SCRIPTSTORE_WINDOW_X + SCRIPTSTORE_WINDOW_WIDTH - BLOCK_MARGIN - 8 - 20 - 4, SCRIPTSTORE_WINDOW_Y - 25 + 13 - 4, 28, 28)) then
         if (not is_dragging and not is_resizing and mouse_down) then
             current_page = current_page + 1;
+            GetScriptStoreData((current_page - 1) * max_shown_scripts, max_shown_scripts);
             last_click = globals.RealTime();
         end
 
@@ -585,33 +598,38 @@ local function DrawPagination(mouse_down, pages)
 end
 
 local function DrawScripts(mouse_down)
-    if (available_scripts == nil or #available_scripts == 0) then
+    if (total_num_of_scripts == 0) then
         return;
     end
 
     local max_scripts_width = math.floor((SCRIPTSTORE_WINDOW_WIDTH - BLOCK_MARGIN) / (BLOCK_WIDTH + (BLOCK_MARGIN)));
     local max_scripts_height = math.floor((SCRIPTSTORE_WINDOW_HEIGHT - BLOCK_MARGIN) / (BLOCK_HEIGHT + (BLOCK_MARGIN)));
 
-    local max_shown_scripts = (max_scripts_width * max_scripts_height);
-    local pages = math.ceil(#available_scripts / max_shown_scripts);
+    max_shown_scripts = (max_scripts_width * max_scripts_height);
+    if (max_shown_scripts ~= last_max_shown_scripts) then
+        current_page = 1;
+        GetScriptStoreData(0, max_shown_scripts);
+        last_max_shown_scripts = max_shown_scripts;
+    end
+
+    local pages = math.ceil(total_num_of_scripts / max_shown_scripts);
 
     DrawPagination(mouse_down, pages);
+
+    if (available_scripts == nil) then
+        return;
+    end
 
     for i = 1, pages do
         if (i == current_page) then
             local row = 1;
             local col = 1;
-            local start_index = (i - 1) * max_shown_scripts;
 
-            for y = 1, max_shown_scripts do
-                if (y + start_index > #available_scripts) then
-                    break;
-                end
-
+            for y = 1, #available_scripts do
                 row = math.ceil(y / max_scripts_width);
                 col = y - ((row - 1) * max_scripts_width);
 
-                local script = available_scripts[y + start_index];
+                local script = available_scripts[y];
 
                 if (script == nil) then
                     break;
@@ -629,6 +647,15 @@ end
 
 local function DrawEvent()
     if (gui.GetValue("lua_allow_http") == false) then
+        draw.Color(255, 0, 0, 255);
+        draw.SetFont(ERROR_FONT);
+        draw.Text(25, 25, "[SCRIPTSTORE] Allow internet connections from lua needs to be enabled to use this script");
+        return;
+    end
+    if (gui.GetValue("lua_allow_cfg") == false) then
+        draw.Color(255, 0, 0, 255);
+        draw.SetFont(ERROR_FONT);
+        draw.Text(25, 25, "[SCRIPTSTORE] Allow script/config editing from lua need to be enabled to use this script");
         return;
     end
 
@@ -659,7 +686,8 @@ local function DrawEvent()
 
     if (should_check_available_scripts == true) then
         should_check_available_scripts = false;
-        GetScriptStoreData();
+        current_page = 1;
+        GetScriptStoreData(0, max_shown_scripts);
         return;
     end
 
