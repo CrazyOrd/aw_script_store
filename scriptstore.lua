@@ -3,7 +3,7 @@
 local SCRIPT_FILE_NAME = GetScriptName();
 local SCRIPT_FILE_ADDR = "https://raw.githubusercontent.com/hyperthegreat/aw_script_store/master/scriptstore.lua";
 local VERSION_FILE_ADDR = "https://raw.githubusercontent.com/hyperthegreat/aw_script_store/master/version.txt";
-local VERSION_NUMBER = "1.0.2";
+local VERSION_NUMBER = "1.0.3";
 local API_URL = "http://api.shadyretard.io";
 
 local available_scripts = {};
@@ -158,10 +158,6 @@ local function ActivateScript(script, do_save)
         RunScript(script.id .. ".lua");
         file.Delete(script.id .. ".lua");
 
-        if (do_save ~= nil or do_save == false) then
-            return;
-        end
-
         if (configs[current_config] == nil) then
             configs[current_config] = {
                 scripts = {}
@@ -170,11 +166,15 @@ local function ActivateScript(script, do_save)
 
         table.insert(configs[current_config].scripts, script);
         script.error = nil;
+
+        if (do_save == nil or do_save == false) then
+            return;
+        end
         SaveConfig();
     end);
 end
 
-local function DeactivateScript(script)
+local function DeactivateScript(script, do_save)
     local script_deactivation = "";
 
     for i = 1, #script.callbacks do
@@ -203,6 +203,9 @@ local function DeactivateScript(script)
         end
     end
 
+    if (do_save == nil or do_save == false) then
+        return;
+    end
     SaveConfig();
 end
 
@@ -401,6 +404,7 @@ local function DrawMenuButtons(mouse_down)
                 current_sorting_direction = 1;
             end
             should_check_available_scripts = true;
+            return true;
         end
     });
 
@@ -413,6 +417,33 @@ local function DrawMenuButtons(mouse_down)
                 current_sorting = 1;
             end
             should_check_available_scripts = true;
+            return true;
+        end
+    });
+
+    table.insert(buttons, {
+        text = "Reset",
+        click = function()
+            if (configs[current_config].scripts == nil) then
+                configs[current_config].scripts = {};
+            end
+
+            for index, obj in pairs(configs[current_config].scripts) do
+                if (obj ~= nil) then
+                    DeactivateScript(obj);
+                end
+            end
+
+            configs[current_config].scripts = {};
+            return false;
+        end
+    });
+
+    table.insert(buttons, {
+        text = "Save " .. current_config,
+        click = function()
+            SaveConfig();
+            return true;
         end
     });
 
@@ -425,7 +456,9 @@ local function DrawMenuButtons(mouse_down)
         if (IsMouseInRect(last_button_x - 16 - text_w, y, 10 + text_w, 25)) then
             AddAnimation(animation_id, "HOVER", { gui.GetValue('clr_gui_window_header_tab1') }, { gui.GetValue('clr_gui_window_header_tab2') }, 10);
             if (not is_dragging and not is_resizing and mouse_down) then
-                button.click();
+                if (button.click() == false) then
+                    return false;
+                end
                 last_click = globals.RealTime();
             end
         else
@@ -438,7 +471,7 @@ local function DrawMenuButtons(mouse_down)
 
         last_button_x = last_button_x - 16 - text_w;
     end
-
+    return true;
 end
 
 local function DrawMenu(mouse_down)
@@ -452,7 +485,9 @@ local function DrawMenu(mouse_down)
     draw.Color(gui.GetValue('clr_gui_text1'));
     draw.TextShadow(SCRIPTSTORE_WINDOW_X + 8, SCRIPTSTORE_WINDOW_Y - 25 - 18, "ScriptStore");
 
-    DrawMenuButtons(mouse_down);
+    if (DrawMenuButtons(mouse_down) == false) then
+        return false;
+    end
 
     draw.Color(gui.GetValue('clr_gui_window_footer'));
     draw.FilledRect(SCRIPTSTORE_WINDOW_X, SCRIPTSTORE_WINDOW_Y + SCRIPTSTORE_WINDOW_HEIGHT, SCRIPTSTORE_WINDOW_X + SCRIPTSTORE_WINDOW_WIDTH, SCRIPTSTORE_WINDOW_Y + SCRIPTSTORE_WINDOW_HEIGHT + 20);
@@ -677,7 +712,6 @@ local function DrawEvent()
     if (loaded_config == true and token ~= SCRIPTSTORE_TOKEN:GetValue() and globals.RealTime() - last_token_update > TOKEN_COOLDOWN) then
         token = SCRIPTSTORE_TOKEN:GetValue();
         last_token_update = globals.RealTime();
-        SaveConfig();
     end
 
     if (SHOW_SCRIPTSTORE_CB:GetValue() == false) then
@@ -696,7 +730,10 @@ local function DrawEvent()
     end
 
     local mouse_down = input.IsButtonPressed(1);
-    DrawMenu(mouse_down);
+    if (DrawMenu(mouse_down) == false) then
+        return;
+    end
+
     DrawScripts(mouse_down);
 end
 
